@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useRef } from 'react'
 import { Key, ArrowRight, Search, AlertCircle, Loader2, CheckCircle } from 'lucide-react'
 import CDKKeyChecker from './CDKKeyChecker'
 import { checkCDKKeyStatus } from '../admin/db'
@@ -8,12 +8,17 @@ interface StepCDKProps {
   onNext: (key: string) => void
 }
 
+type Status = 'idle' | 'checking' | 'valid' | 'used' | 'disabled' | 'notfound'
+
 export default function StepCDK({ lang, onNext }: StepCDKProps) {
   const [value, setValue] = useState('')
   const [error, setError] = useState('')
-  const [status, setStatus] = useState<'idle' | 'checking' | 'valid' | 'used' | 'disabled' | 'notfound'>('idle')
+  const [status, setStatus] = useState<Status>('idle')
   const [showChecker, setShowChecker] = useState(false)
   const [shake, setShake] = useState(false)
+
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const lastCheckedRef = useRef<string>('')
 
   const labels = {
     vi: {
@@ -47,21 +52,34 @@ export default function StepCDK({ lang, onNext }: StepCDKProps) {
   }
   const t = labels[lang]
 
-  async function checkKey(key: string) {
+  async function checkKey(rawKey: string): Promise<Status> {
+    const key = rawKey.trim()
+    if (key === lastCheckedRef.current && status !== 'idle') {
+      return status
+    }
+    lastCheckedRef.current = key
     setStatus('checking')
-    const record = await checkCDKKeyStatus(key)
-    if (!record) {
+
+    try {
+      const record = await checkCDKKeyStatus(key)
+      if (!record) return (setStatus('notfound'), 'notfound' as Status)
+      if (record.status === 'used') return (setStatus('used'), 'used' as Status)
+      if (record.status === 'disabled') return (setStatus('disabled'), 'disabled' as Status)
+      return (setStatus('valid'), 'valid' as Status)
+    } catch {
       setStatus('notfound')
-    } else if (record.status === 'used') {
-      setStatus('used')
-    } else if (record.status === 'disabled') {
-      setStatus('disabled')
-    } else {
-      setStatus('valid')
+      return 'notfound'
     }
   }
 
-  function handleSubmit() {
+  function debouncedCheck(key: string) {
+    if (debounceRef.current) clearTimeout(debounceRef.current)
+    debounceRef.current = setTimeout(() => {
+      checkKey(key)
+    }, 500)
+  }
+
+  async function handleSubmit() {
     const trimmed = value.trim()
     if (trimmed.length < 4) {
       setError(t.error)
@@ -71,7 +89,15 @@ export default function StepCDK({ lang, onNext }: StepCDKProps) {
     }
     setError('')
 
-    if (status === 'used' || status === 'disabled' || status === 'notfound') {
+    // Cancel any pending debounced check
+    if (debounceRef.current) {
+      clearTimeout(debounceRef.current)
+      debounceRef.current = null
+    }
+
+    // Always verify on Enter - never trust stale status
+    const result = await checkKey(trimmed)
+    if (result !== 'valid') {
       setShake(true)
       setTimeout(() => setShake(false), 500)
       return
@@ -84,7 +110,6 @@ export default function StepCDK({ lang, onNext }: StepCDKProps) {
     <>
       <div className={`animate-fade-in-up ${shake ? 'animate-shake' : ''}`}>
         <div className="bg-[#1a1d27] border border-[#2a2d3a] rounded-2xl p-6 shadow-xl">
-          {/* Title */}
           <div className="flex items-center gap-3 mb-5">
             <div className="w-10 h-10 rounded-xl bg-indigo-500/15 flex items-center justify-center">
               <Key size={20} className="text-indigo-400" strokeWidth={1.5} />
@@ -95,10 +120,8 @@ export default function StepCDK({ lang, onNext }: StepCDKProps) {
             </div>
           </div>
 
-          {/* Description */}
           <p className="text-xs text-slate-400 mb-5 leading-relaxed">{t.desc}</p>
 
-          {/* CDK Input */}
           <div className="space-y-2">
             <div className="relative">
               <input
@@ -109,8 +132,9 @@ export default function StepCDK({ lang, onNext }: StepCDKProps) {
                   setValue(upper)
                   if (error) setError('')
                   if (upper.length >= 4) {
-                    checkKey(upper)
+                    debouncedCheck(upper)
                   } else {
+                    if (debounceRef.current) clearTimeout(debounceRef.current)
                     setStatus('idle')
                   }
                 }}
@@ -125,7 +149,6 @@ export default function StepCDK({ lang, onNext }: StepCDKProps) {
                 }`}
                 autoFocus
               />
-              {/* Status icon */}
               <div className="absolute right-3 top-1/2 -translate-y-1/2">
                 {status === 'checking' && (
                   <Loader2 size={16} className="text-slate-400 animate-spin" strokeWidth={1.5} />
@@ -139,7 +162,6 @@ export default function StepCDK({ lang, onNext }: StepCDKProps) {
               </div>
             </div>
 
-            {/* Status message */}
             {status === 'checking' && (
               <p className="text-xs text-slate-500 flex items-center gap-1.5">
                 <Loader2 size={12} className="animate-spin" />
@@ -178,7 +200,6 @@ export default function StepCDK({ lang, onNext }: StepCDKProps) {
             )}
           </div>
 
-          {/* Actions */}
           <div className="mt-5 flex gap-2">
             <button
               onClick={() => setShowChecker(true)}
