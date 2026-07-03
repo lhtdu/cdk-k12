@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { ShieldCheck, KeyRound, Server, LogOut, Activity } from 'lucide-react'
 import CDKKeyManager from './CDKKeyManager'
 import WorkspaceManager from './WorkspaceManager'
@@ -15,12 +15,8 @@ export default function AdminDashboard({ lang, onLogout }: AdminDashboardProps) 
   const [tab, setTab] = useState<Tab>('keys')
   const [stats, setStats] = useState({ keys: 0, live: 0, used: 0, workspaces: 0, disabled: 0 })
 
-  useEffect(() => {
-    refresh()
-  }, [])
-
-  async function refresh() {
-    const [keys, workspaces] = await Promise.all([getCDKKeys(), getWorkspaces()])
+  const refresh = useCallback(async (force = false) => {
+    const [keys, workspaces] = await Promise.all([getCDKKeys(force), getWorkspaces(force)])
     setStats({
       keys: keys.length,
       live: keys.filter(k => k.status === 'live').length,
@@ -28,7 +24,12 @@ export default function AdminDashboard({ lang, onLogout }: AdminDashboardProps) 
       workspaces: workspaces.length,
       disabled: keys.filter(k => k.status === 'disabled').length,
     })
-  }
+  }, [])
+
+  useEffect(() => {
+    // Initial mount: force fresh data
+    refresh(true)
+  }, [refresh])
 
   const labels = {
     vi: {
@@ -132,12 +133,13 @@ export default function AdminDashboard({ lang, onLogout }: AdminDashboardProps) 
           </button>
         </div>
 
-        {/* Tab content */}
-        {tab === 'keys' ? (
-          <CDKKeyManager lang={lang} key={`keys-${lang}`} onKeysChanged={refresh} />
-        ) : (
-          <WorkspaceManager lang={lang} key={`ws-${lang}`} />
-        )}
+        {/* Tab content - keep both mounted to preserve state and avoid remount on tab switch */}
+        <div style={{ display: tab === 'keys' ? 'block' : 'none' }}>
+          <CDKKeyManager lang={lang} onKeysChanged={refresh} />
+        </div>
+        <div style={{ display: tab === 'workspaces' ? 'block' : 'none' }}>
+          <WorkspaceManager lang={lang} onWorkspacesChanged={refresh} />
+        </div>
       </main>
     </div>
   )

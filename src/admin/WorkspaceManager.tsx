@@ -9,9 +9,10 @@ import {
 
 interface WorkspaceManagerProps {
   lang: 'vi' | 'en'
+  onWorkspacesChanged?: () => void
 }
 
-export default function WorkspaceManager({ lang }: WorkspaceManagerProps) {
+export default function WorkspaceManager({ lang, onWorkspacesChanged }: WorkspaceManagerProps) {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([])
   const [showCreate, setShowCreate] = useState(false)
   const [showEdit, setShowEdit] = useState<string | null>(null)
@@ -22,12 +23,12 @@ export default function WorkspaceManager({ lang }: WorkspaceManagerProps) {
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null)
   const [copied, setCopied] = useState<string | null>(null)
 
-  const loadData = useCallback(async () => {
-    setWorkspaces(await getWorkspaces())
+  const loadData = useCallback(async (force = false) => {
+    setWorkspaces(await getWorkspaces(force))
   }, [])
 
   useEffect(() => {
-    loadData()
+    loadData(true)
   }, [loadData])
 
   async function handleCreate() {
@@ -44,6 +45,7 @@ export default function WorkspaceManager({ lang }: WorkspaceManagerProps) {
     setNewName('')
     setNewWsId('')
     setShowCreate(false)
+    onWorkspacesChanged?.()
   }
 
   async function handleEdit(id: string) {
@@ -51,19 +53,21 @@ export default function WorkspaceManager({ lang }: WorkspaceManagerProps) {
     await updateWorkspace(id, { name: editName.trim(), workspaceId: editWsId.trim() })
     await loadData()
     setShowEdit(null)
+    onWorkspacesChanged?.()
   }
 
   async function handleDelete(id: string) {
     await deleteWorkspace(id)
     await loadData()
     setDeleteConfirm(null)
+    onWorkspacesChanged?.()
   }
 
   async function handleSetDefault(id: string) {
-    for (const w of workspaces) {
-      await updateWorkspace(w.id, { isDefault: w.id === id })
-    }
-    await loadData()
+    const next = workspaces.map(w => ({ ...w, isDefault: w.id === id }))
+    await setWorkspaces(next)
+    setWorkspaces(next)
+    onWorkspacesChanged?.()
   }
 
   function copyWsId(id: string) {

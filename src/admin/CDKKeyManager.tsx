@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
 import {
   KeyRound, Plus, Copy, Check, Trash2, Search, X,
   ToggleLeft, ToggleRight, Loader2,
@@ -16,11 +16,14 @@ interface CDKKeyManagerProps {
 
 type TabFilter = 'all' | 'live' | 'used' | 'disabled'
 
+const PAGE_SIZE = 50
+
 export default function CDKKeyManager({ lang, onKeysChanged }: CDKKeyManagerProps) {
   const [keys, setKeys] = useState<CDKKey[]>([])
   const [workspaces, setWorkspaces] = useState<{ id: string; workspaceId: string; name: string }[]>([])
   const [tab, setTab] = useState<TabFilter>('all')
   const [search, setSearch] = useState('')
+  const [page, setPage] = useState(1)
   const [showCreate, setShowCreate] = useState<'single' | 'bulk' | null>(null)
   const [newKeyKey, setNewKeyKey] = useState('')
   const [newKeyWs, setNewKeyWs] = useState('')
@@ -35,8 +38,8 @@ export default function CDKKeyManager({ lang, onKeysChanged }: CDKKeyManagerProp
   const [bulkResults, setBulkResults] = useState<{ key: string; found: boolean; status: string; email?: string }[]>([])
   const [bulkSearching, setBulkSearching] = useState(false)
 
-  const loadData = useCallback(async () => {
-    const [k, w] = await Promise.all([getCDKKeys(), getWorkspaces()])
+  const loadData = useCallback(async (force = false) => {
+    const [k, w] = await Promise.all([getCDKKeys(force), getWorkspaces(force)])
     setKeys(k)
     const wsList = w.map(({ id, workspaceId, name }) => ({ id, workspaceId, name }))
     setWorkspaces(wsList)
@@ -45,11 +48,11 @@ export default function CDKKeyManager({ lang, onKeysChanged }: CDKKeyManagerProp
       setNewKeyWs(prev => prev || defaultWs.workspaceId)
       setBulkWsId(prev => prev || defaultWs.workspaceId)
     }
-    onKeysChanged?.()
-  }, [onKeysChanged])
+  }, [])
 
   useEffect(() => {
-    loadData()
+    // Initial mount: force fresh data
+    loadData(true)
   }, [loadData])
 
   function openCreateModal() {
@@ -63,13 +66,17 @@ export default function CDKKeyManager({ lang, onKeysChanged }: CDKKeyManagerProp
     setShowCreate('single')
   }
 
-  const filtered = keys.filter(k => {
+  const filtered = useMemo(() => keys.filter(k => {
     const matchSearch = search === '' ||
       k.key.toLowerCase().includes(search.toLowerCase()) ||
       (k.activatedEmail || '').toLowerCase().includes(search.toLowerCase())
     const matchFilter = tab === 'all' || k.status === tab
     return matchSearch && matchFilter
-  })
+  }), [keys, search, tab])
+
+  useEffect(() => {
+    setPage(1)
+  }, [search, tab])
 
   function copyKey(key: string, id: string) {
     navigator.clipboard.writeText(key).catch(() => {})
@@ -94,7 +101,11 @@ export default function CDKKeyManager({ lang, onKeysChanged }: CDKKeyManagerProp
     }
     try {
       await addCDKKey(record)
-      await loadData()
+      // Cache already updated by addCDKKey — just reflect locally.
+      // Wrap in requestAnimationFrame so the modal can close smoothly first.
+      requestAnimationFrame(() => {
+        setKeys(prev => [record, ...prev])
+      })
       setNewKeyKey('')
       setNewKeyWs('')
       setCreateSuccess(lang === 'vi' ? `Đã tạo key ${record.key}` : `Created key ${record.key}`)
@@ -102,6 +113,7 @@ export default function CDKKeyManager({ lang, onKeysChanged }: CDKKeyManagerProp
         setShowCreate(null)
         setCreateSuccess('')
       }, 900)
+      onKeysChanged?.()
     } catch (err: any) {
       setCreateError(err?.message || (lang === 'vi' ? 'Tạo key thất bại' : 'Failed to create key'))
     } finally {
@@ -118,27 +130,27 @@ export default function CDKKeyManager({ lang, onKeysChanged }: CDKKeyManagerProp
     setCreating(true)
     setCreateError('')
     setCreateSuccess('')
-    let success = 0
-    let failed: string[] = []
-    for (const line of lines) {
-      const record: CDKKey = {
-        id: crypto.randomUUID(),
-        key: line.toUpperCase(),
-        workspaceId: bulkWsId.trim(),
-        status: 'live',
-        createdAt: Date.now(),
-      }
-      try {
-        await addCDKKey(record)
-        success++
-      } catch (err: any) {
-        failed.push(`${line} (${err?.message || 'error'})`)
-      }
-    }
-    try {
-      await loadData()
-    } catch (err: any) {
-      setCreateError(err?.message || (lang === 'vi' ? 'Lỗi tải lại danh sách' : 'Failed to reload list'))
+
+    const records: CDKKey[] = lines.map(line => ({
+      id: crypto.randomUUID(),
+      key: line.toUpperCase(),
+      workspaceId: bulkWsId.trim(),
+      status: 'live' as const,
+      createdAt: Date.now(),
+    }))
+
+    const results = await Promise.allSettled(records.map(rec => addCDKKey(rec)))
+    const success = results.filter(r => r.status === 'fulfilled').length
+    const failedRecords = records.filter((_, i) => results[i].status === 'rejected')
+    const failed = failedRecords.map(rec => {
+      const reason = (results[records.indexOf(rec)] as PromiseRejectedResult).reason
+      return `${rec.key} (${reason?.message || 'error'})`
+    })
+    const successRecords = records.filter((_, i) => results[i].status === 'fulfilled')
+
+    // Reflect success keys locally — cache already updated by addCDKKey
+    if (successRecords.length > 0) {
+      setKeys(prev => [...successRecords.reverse(), ...prev])
     }
     if (failed.length === 0) {
       setBulkInput('')
@@ -148,11 +160,13 @@ export default function CDKKeyManager({ lang, onKeysChanged }: CDKKeyManagerProp
         setShowCreate(null)
         setCreateSuccess('')
       }, 900)
+      onKeysChanged?.()
     } else if (success > 0) {
       setCreateError(
         (lang === 'vi' ? `Tạo ${success} key thành công, ${failed.length} lỗi: ` : `Created ${success}, ${failed.length} failed: `) +
         failed.slice(0, 3).join('; ') + (failed.length > 3 ? '…' : '')
       )
+      onKeysChanged?.()
     } else {
       setCreateError(
         (lang === 'vi' ? `Tạo thất bại: ` : `All failed: `) + failed.slice(0, 3).join('; ')
@@ -163,14 +177,18 @@ export default function CDKKeyManager({ lang, onKeysChanged }: CDKKeyManagerProp
 
   async function handleDelete(id: string) {
     await deleteCDKKey(id)
-    await loadData()
+    // Cache already updated by deleteCDKKey
+    setKeys(prev => prev.filter(k => k.id !== id))
     setShowDeleteConfirm(null)
+    onKeysChanged?.()
   }
 
   async function handleToggleStatus(key: CDKKey) {
     const next = key.status === 'live' ? 'disabled' : 'live'
     await updateCDKKey(key.id, { status: next })
-    await loadData()
+    // Cache already updated by updateCDKKey
+    setKeys(prev => prev.map(k => k.id === key.id ? { ...k, status: next } : k))
+    onKeysChanged?.()
   }
 
   async function handleBulkCheck() {
@@ -439,7 +457,7 @@ export default function CDKKeyManager({ lang, onKeysChanged }: CDKKeyManagerProp
               </div>
 
               {/* Rows */}
-              {filtered.map(key => (
+              {filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE).map(key => (
                 <div
                   key={key.id}
                   className="grid grid-cols-12 gap-2 items-center px-3 py-2.5 bg-[#1a1d27] rounded-lg hover:bg-[#22253a] transition-colors group"
@@ -520,14 +538,46 @@ export default function CDKKeyManager({ lang, onKeysChanged }: CDKKeyManagerProp
                         className="p-1.5 rounded-lg text-slate-600 hover:text-red-400 hover:bg-red-500/10 transition-all opacity-0 group-hover:opacity-100"
                         title={t.delete}
                       >
-                        <Trash2 size={14} strokeWidth={1.5} />
-                      </button>
+<Trash2 size={14} strokeWidth={1.5} />
+                        </button>
                     )}
                   </div>
                 </div>
               ))}
             </div>
           )}
+        </div>
+      )}
+
+      {/* Pagination */}
+      {!bulkMode && filtered.length > PAGE_SIZE && (
+        <div className="flex items-center justify-between pt-2">
+          <p className="text-[11px] text-slate-500">
+            {lang === 'vi'
+              ? `Hiển thị ${(page - 1) * PAGE_SIZE + 1}–${Math.min(page * PAGE_SIZE, filtered.length)} / ${filtered.length}`
+              : `Showing ${(page - 1) * PAGE_SIZE + 1}–${Math.min(page * PAGE_SIZE, filtered.length)} of ${filtered.length}`}
+          </p>
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() => setPage(p => Math.max(1, p - 1))}
+              disabled={page <= 1}
+              className="text-xs px-3 py-1.5 rounded-lg bg-[#22253a] border border-[#2a2d3a] text-slate-300 hover:text-slate-100 disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {lang === 'vi' ? 'Trước' : 'Prev'}
+            </button>
+            <span className="text-[11px] text-slate-500 px-2">
+              {page} / {Math.ceil(filtered.length / PAGE_SIZE)}
+            </span>
+            <button
+              type="button"
+              onClick={() => setPage(p => Math.min(Math.ceil(filtered.length / PAGE_SIZE), p + 1))}
+              disabled={page >= Math.ceil(filtered.length / PAGE_SIZE)}
+              className="text-xs px-3 py-1.5 rounded-lg bg-[#22253a] border border-[#2a2d3a] text-slate-300 hover:text-slate-100 disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {lang === 'vi' ? 'Sau' : 'Next'}
+            </button>
+          </div>
         </div>
       )}
 

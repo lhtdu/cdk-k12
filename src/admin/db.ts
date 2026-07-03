@@ -3,8 +3,8 @@ import type { CDKKey, Workspace, AdminSession } from './types'
 const ADMIN_TOKEN_KEY = 'cdk_admin_token_v1'
 const KEYS_CACHE_KEY = 'cdk_keys_cache_v2'
 const WS_CACHE_KEY = 'cdk_ws_cache_v2'
-const KEYS_TTL_MS = 30 * 1000
-const WS_TTL_MS = 60 * 1000
+const KEYS_TTL_MS = 5 * 60 * 1000
+const WS_TTL_MS = 10 * 60 * 1000
 
 function getAdminToken(): string {
   if (typeof localStorage === 'undefined') return ''
@@ -49,6 +49,12 @@ const memCache = {
   ws: { ts: 0, data: null as Workspace[] | null },
 }
 
+// In-flight dedup so concurrent callers share one HTTP request
+const inflight = {
+  keys: null as Promise<CDKKey[]> | null,
+  ws: null as Promise<Workspace[]> | null,
+}
+
 async function apiGet(action: string, params: Record<string, string> = {}): Promise<any> {
   const qs = new URLSearchParams({ action, ...params }).toString()
   const res = await fetch(`/api/keys?${qs}`, { headers: adminHeaders() })
@@ -85,6 +91,7 @@ async function apiSend(method: string, action: string, body: any): Promise<any> 
 /**
  * Returns cached list if fresh. Otherwise fetches from API and warms both
  * memory + localStorage. Subsequent reads within KEYS_TTL_MS are instant.
+ * Concurrent callers share a single in-flight request.
  */
 export async function getCDKKeys(forceRefresh = false): Promise<CDKKey[]> {
   const now = Date.now()
@@ -100,11 +107,20 @@ export async function getCDKKeys(forceRefresh = false): Promise<CDKKey[]> {
     }
   }
 
-  const j = await apiGet('list')
-  const keys: CDKKey[] = j.keys || []
-  memCache.keys = { ts: now, data: keys }
-  writeCache(KEYS_CACHE_KEY, keys)
-  return keys
+  if (inflight.keys) return inflight.keys
+
+  inflight.keys = (async () => {
+    try {
+      const j = await apiGet('list')
+      const keys: CDKKey[] = j.keys || []
+      memCache.keys = { ts: Date.now(), data: keys }
+      writeCache(KEYS_CACHE_KEY, keys)
+      return keys
+    } finally {
+      inflight.keys = null
+    }
+  })()
+  return inflight.keys
 }
 
 export async function setCDKKeys(keys: CDKKey[]): Promise<void> {
@@ -116,8 +132,11 @@ export async function setCDKKeys(keys: CDKKey[]): Promise<void> {
 
 export async function addCDKKey(key: CDKKey): Promise<void> {
   await apiSend('POST', 'add', { key })
-  invalidateKeys()
-  memCache.keys = { ts: 0, data: null }
+  // Append to in-memory cache so callers don't need to refetch the full list
+  if (memCache.keys.data) {
+    memCache.keys = { ts: Date.now(), data: [...memCache.keys.data, key] }
+    writeCache(KEYS_CACHE_KEY, memCache.keys.data)
+  }
 }
 
 export async function updateCDKKey(id: string, updates: Partial<CDKKey>): Promise<CDKKey> {
@@ -126,15 +145,27 @@ export async function updateCDKKey(id: string, updates: Partial<CDKKey>): Promis
   if (!existing) throw new Error('Key not found')
   const merged = { ...existing, ...updates }
   const j = await apiSend('PUT', 'update', { key: merged })
-  invalidateKeys()
-  memCache.keys = { ts: 0, data: null }
+  // Update cache in place to avoid full reload
+  if (memCache.keys.data) {
+    memCache.keys = {
+      ts: Date.now(),
+      data: memCache.keys.data.map(k => k.id === id ? j.key : k),
+    }
+    writeCache(KEYS_CACHE_KEY, memCache.keys.data)
+  }
   return j.key
 }
 
 export async function deleteCDKKey(id: string): Promise<void> {
   await apiSend('DELETE', 'delete', { id })
-  invalidateKeys()
-  memCache.keys = { ts: 0, data: null }
+  // Remove from cache so callers don't need to refetch
+  if (memCache.keys.data) {
+    memCache.keys = {
+      ts: Date.now(),
+      data: memCache.keys.data.filter(k => k.id !== id),
+    }
+    writeCache(KEYS_CACHE_KEY, memCache.keys.data)
+  }
 }
 
 export async function getCDKKeyByKey(key: string): Promise<CDKKey | undefined> {
@@ -174,11 +205,20 @@ export async function getWorkspaces(forceRefresh = false): Promise<Workspace[]> 
     }
   }
 
-  const j = await apiGet('ws:list')
-  const list: Workspace[] = j.workspaces || []
-  memCache.ws = { ts: now, data: list }
-  writeCache(WS_CACHE_KEY, list)
-  return list
+  if (inflight.ws) return inflight.ws
+
+  inflight.ws = (async () => {
+    try {
+      const j = await apiGet('ws:list')
+      const list: Workspace[] = j.workspaces || []
+      memCache.ws = { ts: Date.now(), data: list }
+      writeCache(WS_CACHE_KEY, list)
+      return list
+    } finally {
+      inflight.ws = null
+    }
+  })()
+  return inflight.ws
 }
 
 export async function setWorkspaces(workspaces: Workspace[]): Promise<void> {
