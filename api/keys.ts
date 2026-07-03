@@ -133,6 +133,23 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return res.status(200).json({ keys: items })
     }
 
+    if (action === 'stats') {
+      const ids = (await redis(['SMEMBERS', KEY_INDEX])) as string[]
+      let live = 0
+      let used = 0
+      let disabled = 0
+      // Sample first 200 keys for fast stats (avoid 1000 GETs)
+      const sample = ids.slice(0, 200)
+      for (const id of sample) {
+        const rec = await redis(['GET', KEY_PREFIX + id])
+        if (!rec) continue
+        if (rec.status === 'live') live++
+        else if (rec.status === 'used') used++
+        else if (rec.status === 'disabled') disabled++
+      }
+      return res.status(200).json({ total: ids.length, sample: sample.length, live, used, disabled })
+    }
+
     if (action === 'add') {
       const rec = req.body?.key
       if (!rec || !rec.id || !rec.key) {

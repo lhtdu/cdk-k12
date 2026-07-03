@@ -1,6 +1,10 @@
 import type { CDKKey, Workspace, AdminSession } from './types'
 
 const ADMIN_TOKEN_KEY = 'cdk_admin_token_v1'
+const KEYS_CACHE_KEY = 'cdk_keys_cache_v2'
+const WS_CACHE_KEY = 'cdk_ws_cache_v2'
+const KEYS_TTL_MS = 30 * 1000
+const WS_TTL_MS = 60 * 1000
 
 function getAdminToken(): string {
   if (typeof localStorage === 'undefined') return ''
@@ -10,6 +14,39 @@ function getAdminToken(): string {
 function adminHeaders(): Record<string, string> {
   const token = getAdminToken()
   return token ? { 'x-admin-token': token } : {}
+}
+
+function readCache<T>(key: string, ttl: number): T | null {
+  if (typeof localStorage === 'undefined') return null
+  try {
+    const raw = localStorage.getItem(key)
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as { ts: number; data: T }
+    if (!parsed?.ts || Date.now() - parsed.ts > ttl) return null
+    return parsed.data
+  } catch {
+    return null
+  }
+}
+
+function writeCache(key: string, data: unknown): void {
+  if (typeof localStorage === 'undefined') return
+  try {
+    localStorage.setItem(key, JSON.stringify({ ts: Date.now(), data }))
+  } catch {}
+}
+
+function invalidateKeys() {
+  if (typeof localStorage !== 'undefined') localStorage.removeItem(KEYS_CACHE_KEY)
+}
+function invalidateWs() {
+  if (typeof localStorage !== 'undefined') localStorage.removeItem(WS_CACHE_KEY)
+}
+
+// In-memory layer (faster than localStorage on subsequent calls in same page lifetime)
+const memCache = {
+  keys: { ts: 0, data: null as CDKKey[] | null },
+  ws: { ts: 0, data: null as Workspace[] | null },
 }
 
 async function apiGet(action: string, params: Record<string, string> = {}): Promise<any> {
@@ -45,17 +82,42 @@ async function apiSend(method: string, action: string, body: any): Promise<any> 
 
 // ==================== CDK Keys ====================
 
-export async function getCDKKeys(): Promise<CDKKey[]> {
+/**
+ * Returns cached list if fresh. Otherwise fetches from API and warms both
+ * memory + localStorage. Subsequent reads within KEYS_TTL_MS are instant.
+ */
+export async function getCDKKeys(forceRefresh = false): Promise<CDKKey[]> {
+  const now = Date.now()
+
+  if (!forceRefresh) {
+    if (memCache.keys.data && now - memCache.keys.ts < KEYS_TTL_MS) {
+      return memCache.keys.data
+    }
+    const cached = readCache<CDKKey[]>(KEYS_CACHE_KEY, KEYS_TTL_MS)
+    if (cached) {
+      memCache.keys = { ts: now, data: cached }
+      return cached
+    }
+  }
+
   const j = await apiGet('list')
-  return j.keys || []
+  const keys: CDKKey[] = j.keys || []
+  memCache.keys = { ts: now, data: keys }
+  writeCache(KEYS_CACHE_KEY, keys)
+  return keys
 }
 
 export async function setCDKKeys(keys: CDKKey[]): Promise<void> {
   await apiSend('POST', 'replace-all', { keys })
+  invalidateKeys()
+  memCache.keys = { ts: Date.now(), data: keys }
+  writeCache(KEYS_CACHE_KEY, keys)
 }
 
 export async function addCDKKey(key: CDKKey): Promise<void> {
   await apiSend('POST', 'add', { key })
+  invalidateKeys()
+  memCache.keys = { ts: 0, data: null }
 }
 
 export async function updateCDKKey(id: string, updates: Partial<CDKKey>): Promise<CDKKey> {
@@ -64,14 +126,19 @@ export async function updateCDKKey(id: string, updates: Partial<CDKKey>): Promis
   if (!existing) throw new Error('Key not found')
   const merged = { ...existing, ...updates }
   const j = await apiSend('PUT', 'update', { key: merged })
+  invalidateKeys()
+  memCache.keys = { ts: 0, data: null }
   return j.key
 }
 
 export async function deleteCDKKey(id: string): Promise<void> {
   await apiSend('DELETE', 'delete', { id })
+  invalidateKeys()
+  memCache.keys = { ts: 0, data: null }
 }
 
 export async function getCDKKeyByKey(key: string): Promise<CDKKey | undefined> {
+  // Lookup always hits API - freshness is critical, no caching
   try {
     const j = await apiGet('lookup', { key })
     return j.key
@@ -87,17 +154,38 @@ export async function checkCDKKeyStatus(key: string): Promise<CDKKey | undefined
 
 export async function markCDKKeyUsed(key: string, email: string): Promise<void> {
   await apiSend('POST', 'use', { key, email })
+  invalidateKeys()
+  memCache.keys = { ts: 0, data: null }
 }
 
 // ==================== Workspaces ====================
 
-export async function getWorkspaces(): Promise<Workspace[]> {
+export async function getWorkspaces(forceRefresh = false): Promise<Workspace[]> {
+  const now = Date.now()
+
+  if (!forceRefresh) {
+    if (memCache.ws.data && now - memCache.ws.ts < WS_TTL_MS) {
+      return memCache.ws.data
+    }
+    const cached = readCache<Workspace[]>(WS_CACHE_KEY, WS_TTL_MS)
+    if (cached) {
+      memCache.ws = { ts: now, data: cached }
+      return cached
+    }
+  }
+
   const j = await apiGet('ws:list')
-  return j.workspaces || []
+  const list: Workspace[] = j.workspaces || []
+  memCache.ws = { ts: now, data: list }
+  writeCache(WS_CACHE_KEY, list)
+  return list
 }
 
 export async function setWorkspaces(workspaces: Workspace[]): Promise<void> {
   await apiSend('POST', 'ws:replace-all', { workspaces })
+  invalidateWs()
+  memCache.ws = { ts: Date.now(), data: workspaces }
+  writeCache(WS_CACHE_KEY, workspaces)
 }
 
 export async function addWorkspace(ws: Workspace): Promise<void> {
@@ -173,4 +261,8 @@ export async function logoutAdmin(): Promise<void> {
     localStorage.removeItem(ADMIN_TOKEN_KEY)
   }
   await clearAdminSession()
+  invalidateKeys()
+  invalidateWs()
+  memCache.keys = { ts: 0, data: null }
+  memCache.ws = { ts: 0, data: null }
 }
