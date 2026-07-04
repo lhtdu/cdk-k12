@@ -282,18 +282,27 @@ export async function clearAdminSession(): Promise<void> {
 
 // ==================== Admin Login ====================
 
-const ADMIN_USERNAME = 'tandu05'
-const ADMIN_PASSWORD = 'Tandu1710@'
-const BACKEND_ADMIN_TOKEN = 'tandu05-secure-2026'
+// Credentials are validated server-side via /api/auth. This client-side
+// function just sends the request and stores the returned token in
+// localStorage. No password/username is ever stored in the bundle.
 
 export async function loginAdmin(username: string, password: string): Promise<boolean> {
-  if (username.trim() === ADMIN_USERNAME && password === ADMIN_PASSWORD) {
-    if (typeof localStorage !== 'undefined') {
-      localStorage.setItem(ADMIN_TOKEN_KEY, BACKEND_ADMIN_TOKEN)
+  try {
+    const res = await fetch('/api/auth', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    })
+    if (!res.ok) return false
+    const data = await res.json()
+    if (data?.ok && typeof data.token === 'string' && typeof localStorage !== 'undefined') {
+      localStorage.setItem(ADMIN_TOKEN_KEY, data.token)
+      return true
     }
-    return true
+    return false
+  } catch {
+    return false
   }
-  return false
 }
 
 export async function logoutAdmin(): Promise<void> {

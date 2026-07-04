@@ -21,13 +21,7 @@ export interface Workspace {
   createdAt: number
 }
 
-// Admin account (hardcoded credentials for now)
-export interface AdminAccount {
-  username: string
-  password: string
-}
-
-// Admin session
+// Admin session — credentials are stored server-side only (see api/auth.ts)
 export interface AdminSession {
   isLoggedIn: boolean
   username: string
@@ -43,12 +37,6 @@ export const STORAGE_KEYS = {
 
 // Default workspace ID
 export const DEFAULT_WORKSPACE_ID = '5e4c9b31-1b4e-4887-839b-607597928d7c'
-
-// Admin credentials
-export const ADMIN_CREDENTIALS: AdminAccount = {
-  username: 'tandu05',
-  password: 'Tandu1710@',
-}
 
 // Generate a random CDK key (format: XXXX-XXXX-XXXX)
 export function generateCDKKey(): string {
