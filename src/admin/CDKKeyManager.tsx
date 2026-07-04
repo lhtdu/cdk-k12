@@ -36,8 +36,10 @@ export default function CDKKeyManager({ lang, onKeysChanged }: CDKKeyManagerProp
   const [copiedId, setCopiedId] = useState<string | null>(null)
   const [showDeleteConfirm, setShowDeleteConfirm] = useState<string | null>(null)
   const [bulkMode, setBulkMode] = useState(false)
-  const [bulkResults, setBulkResults] = useState<{ key: string; found: boolean; status: string; email?: string }[]>([])
+  const [bulkResults, setBulkResults] = useState<{ key: string; id?: string; found: boolean; status: string; email?: string }[]>([])
   const [bulkSearching, setBulkSearching] = useState(false)
+  const [bulkDisabling, setBulkDisabling] = useState(false)
+  const [bulkDisableProgress, setBulkDisableProgress] = useState({ current: 0, total: 0 })
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [showMove, setShowMove] = useState(false)
   const [moveTargetWs, setMoveTargetWs] = useState('')
@@ -315,6 +317,7 @@ export default function CDKKeyManager({ lang, onKeysChanged }: CDKKeyManagerProp
       const found = keys.find(k => k.key.toLowerCase() === line.toLowerCase())
       return {
         key: line,
+        id: found?.id,
         found: !!found,
         status: found ? found.status : 'not_found',
         email: found?.activatedEmail,
@@ -322,6 +325,50 @@ export default function CDKKeyManager({ lang, onKeysChanged }: CDKKeyManagerProp
     })
     setBulkResults(results)
     setBulkSearching(false)
+  }
+
+  async function handleBulkDisable() {
+    // Disable only entries we found AND that are still 'live'
+    const targets = bulkResults.filter(r => r.found && r.status === 'live' && r.id)
+    if (targets.length === 0) return
+
+    if (!confirm(lang === 'vi'
+      ? `Vô hiệu hóa ${targets.length} key chưa sử dụng?`
+      : `Disable ${targets.length} unactivated key(s)?`)) return
+
+    setBulkDisabling(true)
+    setBulkDisableProgress({ current: 0, total: targets.length })
+
+    const disabledIds: string[] = []
+    const failed: string[] = []
+
+    // Sequential with a breather, same pattern as bulk create / move
+    for (let i = 0; i < targets.length; i++) {
+      const r = targets[i]
+      try {
+        await updateCDKKey(r.id!, { status: 'disabled' })
+        disabledIds.push(r.id!)
+        setKeys(prev => prev.map(x => x.id === r.id ? { ...x, status: 'disabled' as const } : x))
+        // Update the result row live so the dot turns red without waiting for the whole batch
+        setBulkResults(prev => prev.map(x => x.key.toLowerCase() === r.key.toLowerCase() && x.id === r.id
+          ? { ...x, status: 'disabled' }
+          : x))
+      } catch (err: any) {
+        failed.push(`${r.key} (${err?.message || 'error'})`)
+      }
+      setBulkDisableProgress({ current: i + 1, total: targets.length })
+      if (i < targets.length - 1) await new Promise(r => setTimeout(r, 40))
+    }
+
+    if (failed.length === 0) {
+      alert(lang === 'vi' ? `Đã vô hiệu hóa ${disabledIds.length} key` : `Disabled ${disabledIds.length} key(s)`)
+    } else {
+      alert((lang === 'vi' ? `Đã vô hiệu hóa ${disabledIds.length}, ${failed.length} lỗi: ` : `Disabled ${disabledIds.length}, ${failed.length} failed: `) +
+        failed.slice(0, 5).join('; ') + (failed.length > 5 ? '…' : ''))
+    }
+    onKeysChanged?.()
+    setBulkDisabling(false)
+    setBulkDisableProgress({ current: 0, total: 0 })
   }
 
   const stats = {
@@ -484,10 +531,34 @@ export default function CDKKeyManager({ lang, onKeysChanged }: CDKKeyManagerProp
             <div className="space-y-1">
               <div className="flex items-center justify-between">
                 <p className="text-xs font-semibold text-slate-300">{t.checkResult} ({bulkResults.length})</p>
-                <button onClick={() => setBulkResults([])} className="text-xs text-slate-500 hover:text-slate-300">
-                  {t.clearResults}
-                </button>
+                <div className="flex items-center gap-2">
+                  {bulkResults.filter(r => r.found && r.status === 'live' && r.id).length > 0 && (
+                    <button
+                      onClick={handleBulkDisable}
+                      disabled={bulkDisabling}
+                      className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg bg-red-500/20 border border-red-500/40 text-red-300 hover:bg-red-500/30 transition-all disabled:opacity-50"
+                    >
+                      {bulkDisabling ? <Loader2 size={12} className="animate-spin" /> : <ToggleRight size={12} strokeWidth={2} />}
+                      {bulkDisabling && bulkDisableProgress.total > 0
+                        ? (lang === 'vi' ? `Đang vô hiệu ${bulkDisableProgress.current}/${bulkDisableProgress.total}…` : `Disabling ${bulkDisableProgress.current}/${bulkDisableProgress.total}…`)
+                        : (lang === 'vi'
+                            ? `Vô hiệu hóa ${bulkResults.filter(r => r.found && r.status === 'live' && r.id).length} key chưa dùng`
+                            : `Disable ${bulkResults.filter(r => r.found && r.status === 'live' && r.id).length} live key(s)`)}
+                    </button>
+                  )}
+                  <button onClick={() => setBulkResults([])} className="text-xs text-slate-500 hover:text-slate-300">
+                    {t.clearResults}
+                  </button>
+                </div>
               </div>
+              {bulkDisabling && bulkDisableProgress.total > 0 && (
+                <div className="w-full bg-[#1a1d27] rounded-full h-1.5 overflow-hidden">
+                  <div
+                    className="bg-red-500 h-full transition-all duration-150"
+                    style={{ width: `${(bulkDisableProgress.current / bulkDisableProgress.total) * 100}%` }}
+                  />
+                </div>
+              )}
               {bulkResults.map((r, i) => (
                 <div key={i} className="flex items-center justify-between bg-[#1a1d27] rounded-lg px-3 py-2">
                   <div className="flex items-center gap-2">
